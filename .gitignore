@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.env
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+node_modules/
+frontend/dist/
+data/
+logs/*.log
+*.db
+.DS_Store
+Thumbs.db
