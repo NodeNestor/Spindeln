@@ -123,12 +123,15 @@ async def run_investigation(
 
     if person.sourced_facts:
         try:
-            from src.fact_validator import validate_facts, detect_contradictions
+            from src.fact_validator import validate_facts, detect_contradictions, validate_structured_fields
             before_val = len(person.sourced_facts)
             person.sourced_facts = await validate_facts(person.sourced_facts, person)
-            contradictions = detect_contradictions(person.sourced_facts)
+            contradictions = detect_contradictions(person.sourced_facts, person)
             logger.info("Fact validation: %d → %d facts, %d contradictions",
                        before_val, len(person.sourced_facts), len(contradictions))
+
+            # Validate structured fields (company roles, social profiles)
+            person = await validate_structured_fields(person)
         except Exception as e:
             logger.warning("Fact validation failed, continuing: %s", e)
 
