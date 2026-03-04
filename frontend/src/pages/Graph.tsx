@@ -14,7 +14,7 @@ import {
   Maximize2,
 } from "lucide-react";
 
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8082";
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8083";
 
 interface GraphNode {
   id: string;
@@ -259,11 +259,11 @@ export default function Graph() {
         </div>
       </div>
 
-      {/* Graph */}
+      {/* Graph — full height minus toolbar */}
       <div
         ref={containerRef}
         className="w-full bg-zinc-950"
-        style={{ height: "calc(100vh - 100px)" }}
+        style={{ height: "calc(100vh - 80px)" }}
       >
         <ForceGraph2D
           ref={fgRef}

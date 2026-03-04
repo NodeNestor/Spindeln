@@ -1,21 +1,23 @@
 services:
   orchestrator:
     build: ./orchestrator
+    container_name: spindeln-orchestrator
     ports:
-      - "8082:8082"
+      - "8083:8083"
     environment:
       - SPINDELN_HOST=0.0.0.0
-      - SPINDELN_PORT=8082
+      - SPINDELN_PORT=8083
       - HIVEMINDDB_URL=http://hiveminddb:8100
-      - VLLM_URL=http://vllm:8000/v1
-      - VLLM_MODEL=Qwen/Qwen3-8B-AWQ
+      - VLLM_URL=http://deepresearch-vllm:8000/v1
+      - VLLM_MODEL=Qwen/Qwen3.5-0.8B
       - SEARXNG_URL=http://searxng:8080
       - CRAWL4AI_URL=http://crawl4ai:11235
       - LOOM_DB_PATH=/data/loom/loom.db
       - TOR_PROXY=socks5://tor-proxy:9050
     volumes:
       - ./orchestrator/src:/app/src
-      - loom_data:/data/loom:ro
+      - ${LOOM_DATA_PATH:-./data/loom}:/data/loom:ro
+      - orchestrator_data:/app/data
     depends_on:
       - hiveminddb
       - searxng
@@ -26,11 +28,12 @@ services:
 
   frontend:
     build: ./frontend
+    container_name: spindeln-frontend
     ports:
-      - "3000:3000"
+      - "3001:3000"
     environment:
-      - VITE_API_URL=http://localhost:8082
-      - VITE_WS_URL=ws://localhost:8082/ws
+      - VITE_API_URL=http://localhost:8083
+      - VITE_WS_URL=ws://localhost:8083/ws
     depends_on:
       - orchestrator
     networks:
@@ -38,30 +41,29 @@ services:
     restart: unless-stopped
 
   hiveminddb:
-    image: hiveminddb
+    image: deepresearch-hiveminddb:latest
+    container_name: spindeln-hiveminddb
     ports:
-      - "8100:8100"
+      - "8101:8100"
     environment:
       - HIVEMIND_LISTEN_ADDR=0.0.0.0:8100
       - HIVEMIND_EMBEDDING_MODEL=local:all-MiniLM-L6-v2
     volumes:
-      - hivemind_data:/data
+      - hivemind_data:/app/data
     networks:
       - spindeln-net
     restart: unless-stopped
 
   vllm:
-    image: vllm/vllm-openai:latest
+    image: deepresearch-vllm:latest
+    container_name: spindeln-vllm
     ports:
-      - "8000:8000"
+      - "8001:8000"
     environment:
-      - VLLM_MODEL=Qwen/Qwen3-8B-AWQ
-    command: >
-      --model Qwen/Qwen3-8B-AWQ
-      --quantization awq
-      --max-model-len 32768
-      --gpu-memory-utilization 0.90
-      --port 8000
+      - NVIDIA_VISIBLE_DEVICES=all
+      - FLASHINFER_DISABLE_VERSION_CHECK=1
+    volumes:
+      - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
     deploy:
       resources:
         reservations:
@@ -69,14 +71,25 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    entrypoint: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+    command: >
+      --model Qwen/Qwen3.5-0.8B
+      --quantization fp8
+      --max-model-len 32768
+      --gpu-memory-utilization 0.90
+      --port 8000
+      --reasoning-parser qwen3
     networks:
       - spindeln-net
     restart: unless-stopped
+    profiles:
+      - gpu
 
   searxng:
     image: searxng/searxng:latest
+    container_name: spindeln-searxng
     ports:
-      - "8888:8080"
+      - "8889:8080"
     volumes:
       - searxng_data:/etc/searxng
     networks:
@@ -85,8 +98,9 @@ services:
 
   crawl4ai:
     image: unclecode/crawl4ai:latest
+    container_name: spindeln-crawl4ai
     ports:
-      - "11235:11235"
+      - "11236:11235"
     environment:
       - CRAWL4AI_API_TOKEN=
     networks:
@@ -95,8 +109,9 @@ services:
 
   tor-proxy:
     image: dperson/torproxy:latest
+    container_name: spindeln-tor
     ports:
-      - "9050:9050"
+      - "9051:9050"
     networks:
       - spindeln-net
     restart: unless-stopped
@@ -108,9 +123,4 @@ networks:
 volumes:
   hivemind_data:
   searxng_data:
-  loom_data:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: F:/Loom/data
+  orchestrator_data:

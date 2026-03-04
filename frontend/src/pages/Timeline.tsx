@@ -3,7 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, Loader2, AlertTriangle, Filter } from "lucide-react";
 import TimelineView, { TimelineEvent } from "../components/TimelineView";
 
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8082";
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8083";
 
 const categoryFilters = [
   { value: "", label: "All", color: "bg-zinc-500" },
@@ -92,27 +92,29 @@ export default function Timeline() {
         </div>
       </div>
 
-      {/* Category filter */}
-      <div className="flex items-center gap-2 flex-wrap">
-        <Filter className="w-4 h-4 text-zinc-500" />
-        {categoryFilters.map((cat) => (
-          <button
-            key={cat.value}
-            onClick={() => setFilter(cat.value)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-              filter === cat.value
-                ? "bg-zinc-700 text-zinc-100 border border-zinc-600"
-                : "bg-zinc-900 text-zinc-400 border border-zinc-800 hover:border-zinc-700 hover:text-zinc-300"
-            }`}
-          >
-            <div className={`w-2 h-2 rounded-full ${cat.color}`} />
-            {cat.label}
-          </button>
-        ))}
+      {/* Category filter — sticky bar */}
+      <div className="sticky top-0 z-10 bg-zinc-950/90 backdrop-blur-sm pb-3 pt-1 -mt-1">
+        <div className="flex items-center gap-2 flex-wrap">
+          <Filter className="w-4 h-4 text-zinc-500 shrink-0" />
+          {categoryFilters.map((cat) => (
+            <button
+              key={cat.value}
+              onClick={() => setFilter(cat.value)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                filter === cat.value
+                  ? "bg-zinc-700 text-zinc-100 border border-zinc-600"
+                  : "bg-zinc-900 text-zinc-400 border border-zinc-800 hover:border-zinc-700 hover:text-zinc-300"
+              }`}
+            >
+              <div className={`w-2 h-2 rounded-full ${cat.color}`} />
+              {cat.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Timeline */}
-      <div className="max-w-3xl">
+      <div className="w-full">
         <TimelineView events={filteredEvents} />
       </div>
     </div>

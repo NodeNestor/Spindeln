@@ -9,6 +9,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Bug,
+  Settings as SettingsIcon,
 } from "lucide-react";
 import { useState } from "react";
 
@@ -18,11 +19,16 @@ import Profile from "./pages/Profile";
 import Graph from "./pages/Graph";
 import Timeline from "./pages/Timeline";
 import Investigate from "./pages/Investigate";
+import Settings from "./pages/Settings";
 
 const navItems = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard" },
   { to: "/search", icon: Search, label: "Search" },
   { to: "/investigate", icon: Radar, label: "Investigate" },
+];
+
+const bottomNavItems = [
+  { to: "/settings", icon: SettingsIcon, label: "Settings" },
 ];
 
 function Sidebar() {
@@ -76,6 +82,33 @@ function Sidebar() {
         })}
       </nav>
 
+      {/* Bottom nav (Settings) */}
+      <div className="px-2 pb-1 space-y-1">
+        {bottomNavItems.map((item) => {
+          const isActive = location.pathname.startsWith(item.to);
+          return (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 group ${
+                isActive
+                  ? "bg-sky-500/10 text-sky-400 border border-sky-500/20"
+                  : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 border border-transparent"
+              }`}
+            >
+              <item.icon
+                className={`w-5 h-5 shrink-0 ${
+                  isActive
+                    ? "text-sky-400"
+                    : "text-zinc-500 group-hover:text-zinc-300"
+                }`}
+              />
+              {!collapsed && <span>{item.label}</span>}
+            </NavLink>
+          );
+        })}
+      </div>
+
       {/* Collapse toggle */}
       <button
         onClick={() => setCollapsed(!collapsed)}
@@ -104,6 +137,7 @@ export default function App() {
             <Route path="/profile/:id" element={<Profile />} />
             <Route path="/graph/:id" element={<Graph />} />
             <Route path="/timeline/:id" element={<Timeline />} />
+            <Route path="/settings" element={<Settings />} />
           </Routes>
         </div>
       </main>

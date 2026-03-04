@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8082";
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8083";
 
 export interface Fact {
   id: string;
@@ -9,6 +9,9 @@ export interface Fact {
   source: string;
   confidence: number;
   timestamp: string;
+  quality_score?: number;
+  source_url?: string;
+  source_title?: string;
   metadata?: Record<string, any>;
 }
 
@@ -48,6 +51,29 @@ export interface FinancialData {
   income_history?: { year: number; amount: number }[];
 }
 
+export interface ReportSection {
+  heading: string;
+  body: string;
+  confidence: number;
+  citations?: string[];
+}
+
+export interface ReportData {
+  // New DeepResearch-style fields
+  title?: string;
+  summary?: string;
+  sections?: ReportSection[];
+  key_findings?: string[];
+  confidence_overall?: number;
+  gaps?: string[];
+  // Legacy fields (backward compat)
+  narrative?: string;
+  key_facts?: string[];
+  risk_assessment?: string;
+  data_quality?: "high" | "medium" | "low" | string;
+  connections_summary?: string;
+}
+
 export interface PersonProfile {
   id: string;
   name: string;
@@ -67,6 +93,7 @@ export interface PersonProfile {
   social_profiles: SocialProfile[];
   breaches: BreachRecord[];
   financial: FinancialData;
+  report?: ReportData | null;
 
   category_completeness: Record<string, number>;
   total_facts: number;
@@ -118,6 +145,7 @@ export const useProfileStore = create<ProfileStore>((set) => ({
         breaches: data.breaches || [],
         financial: data.financial || { payment_remarks: false },
 
+        report: data.report || null,
         category_completeness: data.category_completeness || {},
         total_facts: data.total_facts || (data.facts || []).length,
         last_updated: data.last_updated || new Date().toISOString(),

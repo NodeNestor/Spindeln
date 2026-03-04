@@ -9,7 +9,9 @@ import {
   Database,
   Clock,
   User,
+  ExternalLink,
 } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import { useInvestigationStore } from "../stores/investigation";
 import SwarmFeed from "../components/SwarmFeed";
 
@@ -25,6 +27,8 @@ const categoryOptions = [
 export default function Investigate() {
   const [target, setTarget] = useState("");
   const [category, setCategory] = useState("");
+
+  const navigate = useNavigate();
 
   const {
     session,
@@ -136,14 +140,24 @@ export default function Investigate() {
           )}
 
           {session && !isRunning && (
-            <button
-              type="button"
-              onClick={clearSession}
-              className="btn-secondary flex items-center gap-2 text-sm"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-              Clear
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={() => navigate(`/profile/${session.session_id}`)}
+                className="btn-primary flex items-center gap-2 text-sm"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                View Profile
+              </button>
+              <button
+                type="button"
+                onClick={clearSession}
+                className="btn-secondary flex items-center gap-2 text-sm"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                Clear
+              </button>
+            </>
           )}
         </div>
 

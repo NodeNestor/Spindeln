@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
 
 from src.agents.base import BaseAgent
 from src.agents.registry import register_agent
 from src.models import Person, SourceType, WebMention
+from src.scraper.searxng_client import parse_date
 
 logger = logging.getLogger(__name__)
 
@@ -31,19 +31,32 @@ class FlashbackAgent(BaseAgent):
     async def run(self, person: Person) -> Person:
         await self._report_progress("running", f"Searching Flashback for {person.namn}")
 
-        # Step 1: Search for mentions on flashback.org
-        query = f'"{person.namn}" site:flashback.org'
-        results = await self.search(query, max_results=10)
+        # Step 1: Build search queries — name + identifiers
+        queries = [f'"{person.namn}" site:flashback.org']
 
-        if not results:
+        ids = self.get_search_identifiers(person)
+        for handle in ids["handles"][:1]:
+            queries.append(f'"{handle}" site:flashback.org')
+        for email in ids["emails"][:1]:
+            queries.append(f'"{email}" site:flashback.org')
+
+        # Step 2: Search with multiple queries
+        all_results = []
+        seen_urls = set()
+        for q in queries[:3]:
+            results = await self.search(q, max_results=10)
+            for r in results:
+                if "flashback.org" in r.url and r.url not in seen_urls:
+                    all_results.append(r)
+                    seen_urls.add(r.url)
+
+        if not all_results:
             await self._report_progress("complete", "No Flashback mentions found")
             return person
 
-        # Step 2: Scrape and extract relevant mentions
+        # Step 3: Scrape and extract relevant mentions
         facts = 0
-        for result in results[:5]:
-            if "flashback.org" not in result.url:
-                continue
+        for result in all_results[:5]:
 
             scraped = await self.scrape(result.url)
             if not scraped.get("success") or not scraped.get("markdown"):
@@ -67,19 +80,12 @@ class FlashbackAgent(BaseAgent):
             )
 
             if verification and verification.get("mentions_person"):
-                mention_date = None
-                if result.published_date:
-                    try:
-                        mention_date = date.fromisoformat(result.published_date[:10])
-                    except (ValueError, TypeError):
-                        pass
-
                 context = verification.get("context", result.snippet[:300])
                 person.web_mentions.append(WebMention(
                     url=result.url,
                     title=result.title,
                     snippet=context,
-                    datum=mention_date,
+                    datum=parse_date(result.published_date),
                     source_type="flashback",
                 ))
                 facts += 1

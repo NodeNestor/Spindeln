@@ -32,22 +32,33 @@ class RedditAgent(BaseAgent):
     async def run(self, person: Person) -> Person:
         await self._report_progress("running", f"Searching Reddit for {person.namn}")
 
-        # Step 1: Search for Reddit profiles and posts
-        query = f'"{person.namn}" site:reddit.com'
+        # Step 1: Build search queries — name + identifiers
+        queries = [f'"{person.namn}" site:reddit.com']
         if person.adress and person.adress.ort:
-            query += f" {person.adress.ort}"
-        results = await self.search(query, max_results=10)
+            queries[0] += f" {person.adress.ort}"
 
-        if not results:
+        ids = self.get_search_identifiers(person)
+        for handle in ids["handles"][:1]:
+            queries.append(f'"{handle}" site:reddit.com')
+
+        # Step 2: Search with multiple queries
+        all_results = []
+        seen_urls = set()
+        for q in queries[:3]:
+            results = await self.search(q, max_results=10)
+            for r in results:
+                if "reddit.com" in r.url and r.url not in seen_urls:
+                    all_results.append(r)
+                    seen_urls.add(r.url)
+
+        if not all_results:
             await self._report_progress("complete", "No Reddit activity found")
             return person
 
         # Separate profile pages from post/comment pages
         profile_urls = []
         post_urls = []
-        for r in results:
-            if "reddit.com" not in r.url:
-                continue
+        for r in all_results:
             if "/user/" in r.url or "/u/" in r.url:
                 profile_urls.append(r)
             else:
@@ -55,8 +66,11 @@ class RedditAgent(BaseAgent):
 
         facts = 0
 
-        # Step 2: Check profile pages for identity match
-        for result in profile_urls[:2]:
+        # Step 3: Check profile pages (up to 2 confirmed)
+        for result in profile_urls[:3]:
+            if facts >= 2:
+                break
+
             scraped = await self.scrape(result.url)
             if not scraped.get("success") or not scraped.get("markdown"):
                 continue
@@ -92,9 +106,8 @@ class RedditAgent(BaseAgent):
                 f"Reddit profile: {result.url} (confidence: {confidence:.0%})",
                 tags=["reddit", "social_media"],
             )
-            break
 
-        # Step 3: Record mentions in posts/comments
+        # Step 4: Record mentions in posts/comments
         for result in post_urls[:5]:
             person.web_mentions.append(WebMention(
                 url=result.url,

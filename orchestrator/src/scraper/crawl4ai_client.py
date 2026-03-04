@@ -46,13 +46,22 @@ async def scrape(url: str, *, wait_for: str = "", css_selector: str = "",
         },
     }
 
-    crawler_params: dict = {}
+    # Default noise removal — strip nav, footer, cookie banners, ads
+    default_remove = [
+        "nav", "footer", "header",
+        "[class*='cookie']", "[class*='consent']", "[class*='banner']",
+        "[class*='ad-']", "[class*='sidebar']", "[id*='cookie']",
+    ]
+
+    crawler_params: dict = {
+        "headless": True,
+        "page_timeout": 30000,
+    }
     if wait_for:
         crawler_params["wait_for"] = wait_for
-    if remove_selectors:
-        crawler_params["remove_selectors"] = remove_selectors
-    if crawler_params:
-        payload["crawler_params"] = crawler_params
+    merged_remove = list(set((remove_selectors or []) + default_remove))
+    crawler_params["remove_selectors"] = merged_remove
+    payload["crawler_params"] = crawler_params
 
     if css_selector:
         payload["css_selector"] = css_selector
@@ -75,11 +84,28 @@ async def scrape(url: str, *, wait_for: str = "", css_selector: str = "",
 
         # Some versions return results directly
         result = data.get("result") or data.get("results", [{}])[0]
+
+        # Check HTTP status — skip 4xx/5xx pages
+        status_code = result.get("status_code", 200)
+        if isinstance(status_code, int) and status_code >= 400:
+            return {
+                "markdown": "",
+                "html": "",
+                "metadata": result.get("metadata", {}),
+                "success": False,
+                "error": f"HTTP {status_code}",
+            }
+
+        # markdown may be a dict (newer Crawl4AI) or a string (older)
+        raw_md = result.get("markdown", "")
+        if isinstance(raw_md, dict):
+            raw_md = raw_md.get("raw_markdown", "") or raw_md.get("fit_markdown", "")
+
         return {
-            "markdown": result.get("markdown", ""),
+            "markdown": raw_md,
             "html": result.get("html", ""),
             "metadata": result.get("metadata", {}),
-            "success": True,
+            "success": bool(raw_md),
             "error": None,
         }
 
@@ -107,11 +133,14 @@ async def _poll_task(client: httpx.AsyncClient, task_id: str,
             status = data.get("status", "")
             if status == "completed":
                 result = data.get("result", {})
+                raw_md = result.get("markdown", "")
+                if isinstance(raw_md, dict):
+                    raw_md = raw_md.get("raw_markdown", "") or raw_md.get("fit_markdown", "")
                 return {
-                    "markdown": result.get("markdown", ""),
+                    "markdown": raw_md,
                     "html": result.get("html", ""),
                     "metadata": result.get("metadata", {}),
-                    "success": True,
+                    "success": bool(raw_md),
                     "error": None,
                 }
             if status == "failed":

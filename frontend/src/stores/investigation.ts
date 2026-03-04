@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8082";
-const WS_URL = import.meta.env.VITE_WS_URL || "ws://localhost:8082/ws";
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8083";
+const WS_URL = import.meta.env.VITE_WS_URL || "ws://localhost:8083/ws";
 
 export interface AgentProgress {
   id: string;
@@ -51,7 +51,7 @@ export const useInvestigationStore = create<InvestigationStore>((set, get) => ({
     set({ isStarting: true, error: null, progress: [] });
 
     try {
-      const body: Record<string, string> = { target };
+      const body: Record<string, string> = { query: target };
       if (category) body.category = category;
 
       const res = await fetch(`${API_URL}/api/investigate`, {
@@ -106,7 +106,7 @@ export const useInvestigationStore = create<InvestigationStore>((set, get) => ({
   connectWebSocket: (sessionId: string) => {
     get().disconnectWebSocket();
 
-    const ws = new WebSocket(`${WS_URL}/investigate/${sessionId}`);
+    const ws = new WebSocket(WS_URL);
 
     ws.onopen = () => {
       set({ isConnected: true });

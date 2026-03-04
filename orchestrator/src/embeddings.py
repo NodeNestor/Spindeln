@@ -17,19 +17,29 @@ logger = logging.getLogger(__name__)
 
 # Lazy-loaded embedder
 _embedder = None
+_use_local = True
 
 
 def _get_embedder():
-    global _embedder
+    global _embedder, _use_local
     if _embedder is None:
-        from sentence_transformers import SentenceTransformer
-        _embedder = SentenceTransformer("all-mpnet-base-v2", device="cuda")
+        try:
+            from sentence_transformers import SentenceTransformer
+            _embedder = SentenceTransformer("all-mpnet-base-v2", device="cuda")
+        except ImportError:
+            logger.warning("sentence-transformers not installed, embeddings disabled")
+            _use_local = False
+            return None
     return _embedder
 
 
-def _embed(text: str) -> list[float]:
-    """Embed a single text, return as list of floats."""
+def _embed(text: str) -> list[float] | None:
+    """Embed a single text, return as list of floats (or None if unavailable)."""
+    if not _use_local:
+        return None
     model = _get_embedder()
+    if model is None:
+        return None
     vec = model.encode(text, normalize_embeddings=True)
     return vec.tolist()
 

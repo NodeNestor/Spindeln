@@ -43,7 +43,10 @@ class InvestigationPhase(str, Enum):
     SOCIAL_MEDIA = "social_media"
     WEB_NEWS = "web_news"
     BREACH_CHECK = "breach_check"
+    FACT_VALIDATION = "fact_validation"
+    DISCOVERY_LOOP = "discovery_loop"
     GRAPH_CONSTRUCTION = "graph_construction"
+    REPORT_SYNTHESIS = "report_synthesis"
     EMBEDDING_GENERATION = "embedding_generation"
     LOOM_BRIDGE = "loom_bridge"
     COMPLETE = "complete"
@@ -185,6 +188,20 @@ class BreachRecord(BaseModel):
     severity: str = ""  # low, medium, high, critical
 
 
+class SourcedFact(BaseModel):
+    """A single extracted fact with full provenance — inspired by DeepResearch."""
+    content: str
+    confidence: float = 0.5  # 0.0-1.0 how confident the extraction is
+    source_url: str = ""
+    source_title: str = ""
+    source_type: str = ""  # web_search, news, ratsit, etc.
+    quality_score: int = 5  # 0-10 page quality (0=irrelevant, 10=primary source)
+    entities: list[str] = Field(default_factory=list)
+    relationships: list[dict] = Field(default_factory=list)
+    category: Optional[str] = "general"  # identity, professional, financial, social, legal, digital
+    discovered_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class SourceReference(BaseModel):
     source_type: SourceType
     url: str = ""
@@ -249,6 +266,9 @@ class Person(BaseModel):
     # Breaches
     breaches: list[BreachRecord] = Field(default_factory=list)
 
+    # Extracted facts (DeepResearch-style with provenance + quality scores)
+    sourced_facts: list[SourcedFact] = Field(default_factory=list)
+
     # Meta
     sources: list[SourceReference] = Field(default_factory=list)
     last_updated: Optional[datetime] = None
@@ -293,6 +313,7 @@ class InvestigationSession(BaseModel):
     agent_progress: list[AgentProgress] = Field(default_factory=list)
     facts_discovered: int = 0
     entities_discovered: int = 0
+    report: Optional[dict] = None
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     error: Optional[str] = None

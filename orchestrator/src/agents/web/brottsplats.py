@@ -54,7 +54,7 @@ class BrottsplatsAgent(BaseAgent):
                     system=CRIME_EXTRACT_SYSTEM,
                     user=f"Extract crime events near '{person.adress}' from this page.",
                 )
-                if not extracted or not extracted.get("events"):
+                if not extracted or not isinstance(extracted, dict) or not extracted.get("events"):
                     continue
 
                 for event in extracted["events"]:

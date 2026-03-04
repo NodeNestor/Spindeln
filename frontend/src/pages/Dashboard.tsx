@@ -10,7 +10,7 @@ import {
   TrendingUp,
 } from "lucide-react";
 
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8082";
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8083";
 
 interface Stats {
   total_persons: number;
@@ -24,6 +24,7 @@ interface RecentInvestigation {
   status: string;
   started_at: string;
   total_facts: number;
+  person_id?: string;
 }
 
 export default function Dashboard() {
@@ -59,6 +60,8 @@ export default function Dashboard() {
     };
 
     fetchData();
+    const interval = setInterval(fetchData, 5000);
+    return () => clearInterval(interval);
   }, []);
 
   const handleSearch = (e: React.FormEvent) => {
@@ -223,7 +226,7 @@ export default function Dashboard() {
               <div
                 key={inv.id}
                 className="card-hover flex items-center justify-between"
-                onClick={() => navigate(`/profile/${inv.id}`)}
+                onClick={() => navigate(`/profile/${inv.person_id || inv.id}`)}
               >
                 <div className="flex items-center gap-3">
                   <div

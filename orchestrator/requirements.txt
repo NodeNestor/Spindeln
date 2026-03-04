@@ -6,6 +6,7 @@ pydantic-settings>=2.7.0
 websockets>=14.0
 mcp>=1.0.0
 jellyfish>=1.1.0
-sentence-transformers>=3.0.0
 numpy>=1.26.0
 aiosqlite>=0.20.0
+# sentence-transformers — install separately for GPU embedding support
+# pip install sentence-transformers  (pulls ~5GB PyTorch)

@@ -11,6 +11,7 @@ from src.config import settings
 from src.models import (
     InvestigationPhase, InvestigationSession, Person, ProgressEvent,
 )
+from src.scraper.extractors import deduplicate_facts
 from src.agents.base import BaseAgent
 from src.agents.registry import get_agents_by_category, get_all_agents
 from src.storage.client import HiveMindClient
@@ -116,7 +117,37 @@ async def run_investigation(
     await _progress(InvestigationPhase.BREACH_CHECK, status="complete",
                     facts=session.facts_discovered)
 
-    # ── Phase 4: Graph Construction ───────────────────────────────────────
+    # ── Phase 3.6: Fact Validation ─────────────────────────────────────────
+    await _progress(InvestigationPhase.FACT_VALIDATION, status="running",
+                    message="Validating facts against identity profile")
+
+    if person.sourced_facts:
+        try:
+            from src.fact_validator import validate_facts, detect_contradictions
+            before_val = len(person.sourced_facts)
+            person.sourced_facts = await validate_facts(person.sourced_facts, person)
+            contradictions = detect_contradictions(person.sourced_facts)
+            logger.info("Fact validation: %d → %d facts, %d contradictions",
+                       before_val, len(person.sourced_facts), len(contradictions))
+        except Exception as e:
+            logger.warning("Fact validation failed, continuing: %s", e)
+
+    await _progress(InvestigationPhase.FACT_VALIDATION, status="complete",
+                    facts=session.facts_discovered)
+
+    # ── Phase 3.7: Discovery Loop ──────────────────────────────────────────
+    await _progress(InvestigationPhase.DISCOVERY_LOOP, status="running",
+                    message="Running iterative discovery loop")
+
+    try:
+        person = await _run_discovery_loop(person, hivemind, session, _progress)
+    except Exception as e:
+        logger.warning("Discovery loop failed, continuing: %s", e)
+
+    await _progress(InvestigationPhase.DISCOVERY_LOOP, status="complete",
+                    facts=session.facts_discovered)
+
+    # ── Phase 4: Graph Construction + Timeline ─────────────────────────────
     await _progress(InvestigationPhase.GRAPH_CONSTRUCTION, status="running",
                     message="Building knowledge graph")
 
@@ -125,7 +156,36 @@ async def run_investigation(
         if "graph" in agent.name:
             person = await _run_agent(agent, person, hivemind, progress_callback, session)
 
+    # Run TimelineBuilder after graph construction
+    for agent in analysis_agents:
+        if "timeline" in agent.name:
+            person = await _run_agent(agent, person, hivemind, progress_callback, session)
+
     await _progress(InvestigationPhase.GRAPH_CONSTRUCTION, status="complete")
+
+    # ── Fact Deduplication ────────────────────────────────────────────────
+    if person.sourced_facts:
+        before = len(person.sourced_facts)
+        person.sourced_facts = deduplicate_facts(person.sourced_facts)
+        logger.info("Deduplication: %d → %d facts for %s",
+                     before, len(person.sourced_facts), person.namn)
+
+    # ── Phase 4.5: Report Synthesis ──────────────────────────────────────
+    await _progress(InvestigationPhase.REPORT_SYNTHESIS, status="running",
+                    message="Generating intelligence report")
+
+    for agent in analysis_agents:
+        if "profile_synth" in agent.name:
+            person = await _run_agent(agent, person, hivemind, progress_callback, session)
+
+    # Use the LLM synthesis result as the report if available, fallback to raw data
+    if hasattr(person, '_synth_report') and person._synth_report:
+        session.report = person._synth_report
+    else:
+        session.report = _build_report(person)
+
+    await _progress(InvestigationPhase.REPORT_SYNTHESIS, status="complete",
+                    message="Report synthesis complete")
 
     # ── Phase 5: Embeddings ───────────────────────────────────────────────
     await _progress(InvestigationPhase.EMBEDDING_GENERATION, status="running",
@@ -235,7 +295,7 @@ def _merge_person(base: Person, update: Person) -> Person:
         "inkomst", "skatt", "betalningsanmarkningar", "foretag",
         "fastigheter", "fordon", "familj", "grannar",
         "social_media", "web_mentions", "news_mentions", "breaches",
-        "sources", "adress_historik",
+        "sources", "adress_historik", "sourced_facts",
     ]:
         base_list = getattr(base, field)
         update_list = getattr(update, field)
@@ -258,6 +318,41 @@ def _merge_person(base: Person, update: Person) -> Person:
     return base
 
 
+def _build_report(person: Person) -> dict:
+    """Build a report dict from all gathered person data."""
+    news = [
+        {"title": n.title, "publication": n.publication or "", "snippet": n.snippet or ""}
+        for n in person.news_mentions[:10]
+    ]
+    web = [
+        {"title": w.title or "", "url": w.url, "snippet": w.snippet or ""}
+        for w in person.web_mentions[:10]
+    ]
+    companies = [
+        {"name": c.foretag_namn, "role": c.roll.value if hasattr(c.roll, "value") else str(c.roll)}
+        for c in person.foretag
+    ]
+    return {
+        "name": person.namn,
+        "personnummer": person.personnummer,
+        "address": str(person.adress) if person.adress else None,
+        "employer": person.arbetsgivare,
+        "news_mentions": news,
+        "web_mentions": web,
+        "companies": companies,
+        "social_profiles": [
+            {"platform": s.platform, "username": s.username or "", "url": s.url}
+            for s in person.social_media
+        ],
+        "breaches": [
+            {"name": b.breach_name, "severity": b.severity}
+            for b in person.breaches
+        ],
+        "total_facts": _count_facts(person),
+        "sources_count": len(person.sources),
+    }
+
+
 def _count_facts(person: Person) -> int:
     """Count total facts discovered about a person."""
     count = 0
@@ -277,3 +372,174 @@ def _count_facts(person: Person) -> int:
     count += 1 if person.adress else 0
     count += 1 if person.arbetsgivare else 0
     return count
+
+
+# ── Discovery Loop ────────────────────────────────────────────────────────────
+
+import re as _re
+
+_EMAIL_RE = _re.compile(r'[\w.+-]+@[\w-]+\.[\w.-]+')
+_HANDLE_RE = _re.compile(r'@([\w.]{3,30})')
+
+
+def _collect_identifiers(person: Person) -> set[str]:
+    """Collect all known identifiers from person data for re-search."""
+    ids: set[str] = set()
+
+    # Emails and handles from social profiles
+    for sp in person.social_media:
+        if sp.username:
+            ids.add(sp.username)
+
+    # From sourced_facts
+    for fact in person.sourced_facts:
+        for email in _EMAIL_RE.findall(fact.content):
+            ids.add(email)
+        for handle in _HANDLE_RE.findall(fact.content):
+            ids.add(handle)
+
+    # From breach data
+    for breach in person.breaches:
+        for exp in breach.exposed_data:
+            if "@" in exp:
+                ids.add(exp)
+
+    # Company names
+    for co in person.foretag:
+        if co.foretag_namn:
+            ids.add(co.foretag_namn)
+
+    return ids
+
+
+async def _run_discovery_loop(
+    person: Person,
+    hivemind: HiveMindClient,
+    session: InvestigationSession,
+    progress_fn,
+) -> Person:
+    """Iterative discovery: use found identifiers to search for more data.
+
+    Searches with emails, handles, and company names found during earlier phases.
+    Stops when no new identifiers are found or max iterations reached.
+    """
+    from src.scraper import searxng_client, crawl4ai_client
+    from src.scraper.extractors import deduplicate_facts
+    from src.agents.base import BaseAgent
+    from src.models import SourcedFact, SourceType
+
+    max_iters = settings.max_discovery_iterations
+    seen_identifiers: set[str] = {person.namn.lower()}
+    # Seed with already-known identifiers so we don't re-search them
+    for ident in _collect_identifiers(person):
+        seen_identifiers.add(ident.lower())
+
+    for iteration in range(max_iters):
+        # Collect current identifiers
+        current_ids = _collect_identifiers(person)
+        new_ids = {i for i in current_ids if i.lower() not in seen_identifiers}
+
+        if not new_ids:
+            logger.info("Discovery loop: converged after %d iterations (no new identifiers)", iteration)
+            break
+
+        logger.info("Discovery loop iteration %d: %d new identifiers: %s",
+                    iteration + 1, len(new_ids), list(new_ids)[:5])
+
+        await progress_fn(
+            InvestigationPhase.DISCOVERY_LOOP, status="running",
+            message=f"Discovery iteration {iteration + 1}: searching {len(new_ids)} new identifiers",
+        )
+
+        # Mark these as seen
+        for ident in new_ids:
+            seen_identifiers.add(ident.lower())
+
+        # Search with each new identifier (limit to 5 per iteration)
+        search_queries = []
+        for ident in list(new_ids)[:5]:
+            if "@" in ident and "." in ident:
+                # Email — search directly
+                search_queries.append(f'"{ident}"')
+            elif ident.startswith("@") or (len(ident) > 3 and not " " in ident):
+                # Handle — search with person name context
+                search_queries.append(f'"{ident}" {person.namn}')
+            else:
+                # Company or other — search with context
+                search_queries.append(f'"{ident}" {person.namn}')
+
+        new_facts_count = 0
+        for query in search_queries:
+            try:
+                await asyncio.sleep(settings.searxng_delay_seconds)
+                results = await searxng_client.search(query, max_results=3)
+            except Exception as e:
+                logger.debug("Discovery search failed for %s: %s", query, e)
+                continue
+
+            for result in results[:2]:
+                try:
+                    await asyncio.sleep(settings.scrape_delay_seconds)
+                    scraped = await crawl4ai_client.scrape(result.url)
+                except Exception:
+                    continue
+
+                if not scraped.get("success") or not scraped.get("markdown"):
+                    continue
+
+                # Use a temporary BaseAgent-like extraction
+                from src.scraper.extractors import extract_page_facts as _extract
+
+                # Build identity anchors
+                anchors = {}
+                if person.fodelsedatum:
+                    anchors["birth_date"] = str(person.fodelsedatum)
+                if person.adress and person.adress.gatuadress:
+                    anchors["address"] = f"{person.adress.gatuadress}, {person.adress.ort or ''}"
+                if person.personnummer:
+                    anchors["personnummer"] = person.personnummer
+
+                context_parts = []
+                if person.adress and person.adress.ort:
+                    context_parts.append(f"Location: {person.adress.ort}")
+                if person.arbetsgivare:
+                    context_parts.append(f"Employer: {person.arbetsgivare}")
+
+                fact_result = await _extract(
+                    scraped["markdown"], person.namn,
+                    person_context=". ".join(context_parts),
+                    source_url=result.url,
+                    source_title=getattr(result, 'title', ''),
+                    identity_anchors=anchors,
+                )
+
+                if not fact_result or not fact_result.get("relevant"):
+                    continue
+
+                quality = fact_result.get("quality", 0)
+                if quality < 2:
+                    continue
+
+                for f in fact_result.get("facts", []):
+                    fact = SourcedFact(
+                        content=f.get("fact", ""),
+                        confidence=f.get("confidence", 0.5),
+                        source_url=result.url,
+                        source_title=getattr(result, 'title', ''),
+                        source_type=SourceType.WEB_SEARCH.value,
+                        quality_score=quality,
+                        entities=[e.get("name", "") for e in fact_result.get("entities", []) if isinstance(e, dict)],
+                        relationships=[r for r in fact_result.get("relationships", []) if isinstance(r, dict)],
+                        category=f.get("category") or "general",
+                    )
+                    if fact.content:
+                        person.sourced_facts.append(fact)
+                        new_facts_count += 1
+
+        logger.info("Discovery loop iteration %d: found %d new facts", iteration + 1, new_facts_count)
+
+        if new_facts_count == 0:
+            logger.info("Discovery loop: no new facts in iteration %d, stopping", iteration + 1)
+            break
+
+    return person

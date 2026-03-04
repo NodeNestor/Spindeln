@@ -32,32 +32,45 @@ class FacebookAgent(BaseAgent):
     async def run(self, person: Person) -> Person:
         await self._report_progress("running", f"Searching Facebook for {person.namn}")
 
-        # Step 1: Search for Facebook profiles
-        query = f'"{person.namn}" site:facebook.com'
+        # Step 1: Build search queries — name + additional identifiers
+        queries = [f'"{person.namn}" site:facebook.com']
         if person.adress and person.adress.ort:
-            query += f" {person.adress.ort}"
-        results = await self.search(query, max_results=5)
+            queries[0] += f" {person.adress.ort}"
 
-        if not results:
+        ids = self.get_search_identifiers(person)
+        for email in ids["emails"][:1]:
+            queries.append(f'"{email}" site:facebook.com')
+        for handle in ids["handles"][:1]:
+            queries.append(f'"{handle}" site:facebook.com')
+
+        # Step 2: Search with multiple queries (max 3)
+        all_results = []
+        seen_urls = set()
+        for q in queries[:3]:
+            results = await self.search(q, max_results=5)
+            for r in results:
+                if "facebook.com" in r.url and r.url not in seen_urls:
+                    all_results.append(r)
+                    seen_urls.add(r.url)
+
+        if not all_results:
             await self._report_progress("complete", "No Facebook profiles found")
             return person
 
-        # Step 2: Scrape and verify each candidate profile
+        # Step 3: Scrape and verify candidate profiles (up to 2 confirmed)
         facts = 0
-        for result in results[:3]:
-            if "facebook.com" not in result.url:
-                continue
+        for result in all_results[:5]:
+            if facts >= 2:
+                break
 
             scraped = await self.scrape(result.url)
             if not scraped.get("success") or not scraped.get("markdown"):
                 continue
 
-            # Step 3: Extract profile data via LLM
             profile_data = await extractors.extract_social_profile(scraped["markdown"])
             if not profile_data:
                 continue
 
-            # Step 4: Verify identity match
             person_summary = self._build_person_summary(person)
             verification = await extractors.verify_social_match(
                 person_summary, json.dumps(profile_data, ensure_ascii=False),
@@ -69,7 +82,6 @@ class FacebookAgent(BaseAgent):
             if confidence < 0.5:
                 continue
 
-            # Step 5: Add confirmed profile
             person.social_media.append(SocialProfile(
                 platform="facebook",
                 url=result.url,
@@ -82,16 +94,38 @@ class FacebookAgent(BaseAgent):
             ))
             facts += 1
 
+            # Extract handles/emails from bio for discovery loop
+            self._extract_bio_identifiers(person, profile_data)
+
             await self.store_person_fact(
                 person,
                 f"Facebook profile: {result.url} (confidence: {confidence:.0%})",
                 tags=["facebook", "social_media"],
             )
-            break  # Stop after first confirmed match
 
         person.sources.append(self.make_source_ref("https://facebook.com"))
         await self._report_progress("complete", f"Found {facts} profiles", facts_found=facts)
         return person
+
+    @staticmethod
+    def _extract_bio_identifiers(person: Person, profile_data: dict):
+        """Parse bio/website for handles, emails, links — store as sourced_facts."""
+        import re
+        from src.models import SourcedFact
+        bio = profile_data.get("bio", "") or ""
+        website = profile_data.get("website", "") or ""
+        text = f"{bio} {website}"
+
+        for email in re.findall(r'[\w.+-]+@[\w-]+\.[\w.-]+', text):
+            person.sourced_facts.append(SourcedFact(
+                content=f"Email found in Facebook bio: {email}",
+                confidence=0.7, source_type="facebook", category="digital",
+            ))
+        for handle in re.findall(r'@([\w.]{3,30})', text):
+            person.sourced_facts.append(SourcedFact(
+                content=f"Handle found in Facebook bio: @{handle}",
+                confidence=0.6, source_type="facebook", category="digital",
+            ))
 
     @staticmethod
     def _build_person_summary(person: Person) -> str:

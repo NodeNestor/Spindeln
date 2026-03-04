@@ -51,6 +51,14 @@ class AhmiaAgent(BaseAgent):
 
             for mention in extracted["mentions"]:
                 severity = mention.get("severity", "medium")
+                url = mention.get("url", "")
+
+                # Skip Ahmia/Tor boilerplate pages (navigation links, not results)
+                if any(skip in url for skip in [
+                    "ahmia.fi/", "torproject.org", "support.torproject.org",
+                ]):
+                    continue
+
                 # If it looks like breach data, add as BreachRecord
                 if mention.get("is_breach"):
                     person.breaches.append(BreachRecord(
@@ -61,7 +69,7 @@ class AhmiaAgent(BaseAgent):
                     ))
                 else:
                     person.web_mentions.append(WebMention(
-                        url=mention.get("url", AHMIA_SEARCH_URL),
+                        url=url or AHMIA_SEARCH_URL,
                         title=mention.get("title", "Dark web mention"),
                         snippet=mention.get("summary", ""),
                         source_type="ahmia",

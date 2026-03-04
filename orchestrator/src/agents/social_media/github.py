@@ -42,19 +42,20 @@ class GitHubAgent(BaseAgent):
             await self._report_progress("complete", "No GitHub profiles found")
             return person
 
-        # Step 2: Scrape and verify each candidate profile
+        # Step 2: Scrape and verify (up to 2 confirmed)
         facts = 0
-        for url in candidates[:3]:
+        for url in candidates[:5]:
+            if facts >= 2:
+                break
+
             scraped = await self.scrape(url)
             if not scraped.get("success") or not scraped.get("markdown"):
                 continue
 
-            # Step 3: Extract profile data via LLM
             profile_data = await extractors.extract_social_profile(scraped["markdown"])
             if not profile_data:
                 continue
 
-            # Step 4: Verify identity match
             person_summary = self._build_person_summary(person)
             verification = await extractors.verify_social_match(
                 person_summary, json.dumps(profile_data, ensure_ascii=False),
@@ -66,7 +67,6 @@ class GitHubAgent(BaseAgent):
             if confidence < 0.5:
                 continue
 
-            # Step 5: Add confirmed profile
             person.social_media.append(SocialProfile(
                 platform="github",
                 url=url,
@@ -79,12 +79,13 @@ class GitHubAgent(BaseAgent):
             ))
             facts += 1
 
+            self._extract_bio_identifiers(person, profile_data)
+
             await self.store_person_fact(
                 person,
                 f"GitHub profile: {url} (confidence: {confidence:.0%})",
                 tags=["github", "social_media", "developer"],
             )
-            break
 
         person.sources.append(self.make_source_ref("https://github.com"))
         await self._report_progress("complete", f"Found {facts} profiles", facts_found=facts)
@@ -94,12 +95,20 @@ class GitHubAgent(BaseAgent):
         """Find candidate GitHub profile URLs from multiple sources."""
         urls: list[str] = []
 
-        # SearXNG search
+        # SearXNG search — name
         query = f'"{person.namn}" site:github.com'
         results = await self.search(query, max_results=5)
         for r in results:
             if "github.com" in r.url and r.url not in urls:
                 urls.append(r.url)
+
+        # Additional identifier searches
+        ids = self.get_search_identifiers(person)
+        for email in ids["emails"][:1]:
+            results = await self.search(f'"{email}" site:github.com', max_results=3)
+            for r in results:
+                if "github.com" in r.url and r.url not in urls:
+                    urls.append(r.url)
 
         # GitHub API user search (free, unauthenticated)
         try:
@@ -118,6 +127,19 @@ class GitHubAgent(BaseAgent):
             logger.debug("GitHub API search failed: %s", e)
 
         return urls
+
+    @staticmethod
+    def _extract_bio_identifiers(person: Person, profile_data: dict):
+        import re
+        from src.models import SourcedFact
+        bio = profile_data.get("bio", "") or ""
+        website = profile_data.get("website", "") or ""
+        text = f"{bio} {website}"
+        for email in re.findall(r'[\w.+-]+@[\w-]+\.[\w.-]+', text):
+            person.sourced_facts.append(SourcedFact(
+                content=f"Email found in GitHub bio: {email}",
+                confidence=0.7, source_type="github", category="digital",
+            ))
 
     @staticmethod
     def _build_person_summary(person: Person) -> str:

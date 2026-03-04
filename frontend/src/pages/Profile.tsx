@@ -16,6 +16,8 @@ import {
   ExternalLink,
   ArrowLeft,
   Clock,
+  FileText,
+  Newspaper,
 } from "lucide-react";
 import {
   BarChart,
@@ -32,15 +34,17 @@ import ConnectionGraph from "../components/ConnectionGraph";
 import SourceBadge from "../components/SourceBadge";
 import FactCard from "../components/FactCard";
 
-type TabId = "overview" | "financial" | "companies" | "social" | "breaches" | "connections";
+type TabId = "overview" | "news" | "financial" | "companies" | "social" | "breaches" | "connections" | "report";
 
 const tabs: { id: TabId; label: string; icon: typeof User }[] = [
   { id: "overview", label: "Overview", icon: User },
+  { id: "news", label: "News", icon: Newspaper },
   { id: "financial", label: "Financial", icon: CreditCard },
   { id: "companies", label: "Companies", icon: Building2 },
   { id: "social", label: "Social", icon: Globe },
   { id: "breaches", label: "Breaches", icon: Shield },
   { id: "connections", label: "Connections", icon: Network },
+  { id: "report", label: "Report", icon: FileText },
 ];
 
 export default function Profile() {
@@ -203,11 +207,13 @@ export default function Profile() {
       {/* Tab content */}
       <div className="animate-fade-in">
         {activeTab === "overview" && <OverviewTab />}
+        {activeTab === "news" && <NewsTab />}
         {activeTab === "financial" && <FinancialTab />}
         {activeTab === "companies" && <CompaniesTab />}
         {activeTab === "social" && <SocialTab />}
         {activeTab === "breaches" && <BreachesTab />}
         {activeTab === "connections" && <ConnectionsTab />}
+        {activeTab === "report" && <ReportTab />}
       </div>
     </div>
   );
@@ -224,7 +230,7 @@ function OverviewTab() {
           Recent Facts
         </h3>
         {profile.facts.length > 0 ? (
-          profile.facts.slice(0, 10).map((fact) => (
+          profile.facts.slice(0, 15).map((fact) => (
             <FactCard
               key={fact.id}
               content={fact.content}
@@ -232,6 +238,8 @@ function OverviewTab() {
               timestamp={fact.timestamp}
               confidence={fact.confidence}
               category={fact.category}
+              quality_score={fact.quality_score}
+              source_url={fact.source_url}
             />
           ))
         ) : (
@@ -596,6 +604,47 @@ function BreachesTab() {
   );
 }
 
+function NewsTab() {
+  const profile = useProfileStore((s) => s.profile)!;
+  const newsFacts = profile.facts.filter((f) => f.category === "news");
+
+  return (
+    <div className="space-y-4">
+      <h3 className="text-sm font-semibold text-zinc-300 uppercase tracking-wider">
+        News Mentions ({newsFacts.length})
+      </h3>
+
+      {newsFacts.length === 0 ? (
+        <p className="text-sm text-zinc-500 py-4">No news mentions found</p>
+      ) : (
+        <div className="space-y-3">
+          {newsFacts.map((fact, idx) => (
+            <div
+              key={fact.id || idx}
+              className="card border-l-2 border-l-purple-500 animate-fade-in"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <Newspaper className="w-3.5 h-3.5 text-purple-400 shrink-0" />
+                    <span className="text-xs font-medium text-purple-400 uppercase">
+                      {fact.source}
+                    </span>
+                  </div>
+                  <p className="text-sm text-zinc-200 leading-relaxed">
+                    {fact.content}
+                  </p>
+                </div>
+                <SourceBadge source={fact.source} />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ConnectionsTab() {
   const profile = useProfileStore((s) => s.profile)!;
 
@@ -630,8 +679,8 @@ function ConnectionsTab() {
         <p className="text-sm text-zinc-500 py-4">No connections found</p>
       ) : (
         <>
-          <div className="card p-0 overflow-hidden">
-            <ConnectionGraph nodes={nodes} links={links} height={500} />
+          <div className="card p-0 overflow-hidden" style={{ height: "calc(100vh - 300px)", minHeight: 500 }}>
+            <ConnectionGraph nodes={nodes} links={links} height={Math.max(500, window.innerHeight - 300)} />
           </div>
 
           {/* Connection list */}
@@ -657,6 +706,199 @@ function ConnectionsTab() {
             ))}
           </div>
         </>
+      )}
+    </div>
+  );
+}
+
+function ReportTab() {
+  const profile = useProfileStore((s) => s.profile)!;
+  const report = profile.report;
+
+  if (!report) {
+    return (
+      <div className="flex flex-col items-center justify-center py-12 text-zinc-500">
+        <FileText className="w-10 h-10 mb-3 text-zinc-600" />
+        <p className="text-sm">No report generated yet</p>
+      </div>
+    );
+  }
+
+  const qualityColor =
+    report.data_quality === "high"
+      ? "text-emerald-400 bg-emerald-500/15"
+      : report.data_quality === "medium"
+      ? "text-amber-400 bg-amber-500/15"
+      : "text-red-400 bg-red-500/15";
+
+  const confidencePercent = report.confidence_overall
+    ? Math.round(report.confidence_overall * 100)
+    : null;
+
+  return (
+    <div className="space-y-6 max-w-4xl">
+      {/* Report header */}
+      <div className="card bg-gradient-to-br from-zinc-900 to-zinc-950 border-sky-500/30">
+        <div className="flex items-start justify-between">
+          <div>
+            <h3 className="text-lg font-bold text-zinc-100 flex items-center gap-2">
+              <FileText className="w-5 h-5 text-sky-400" />
+              {report.title || `Intelligence Report: ${profile.name}`}
+            </h3>
+            {report.summary && (
+              <p className="text-sm text-zinc-400 mt-2 leading-relaxed max-w-2xl">
+                {report.summary}
+              </p>
+            )}
+          </div>
+          <div className="flex flex-col items-end gap-2 shrink-0">
+            {report.data_quality && (
+              <span className={`text-xs font-medium px-2.5 py-1 rounded-full ${qualityColor}`}>
+                {report.data_quality.charAt(0).toUpperCase() + report.data_quality.slice(1)} quality
+              </span>
+            )}
+            {confidencePercent !== null && (
+              <span className="text-xs text-zinc-500">
+                {confidencePercent}% confidence
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Sections (DeepResearch-style with confidence bars) */}
+      {report.sections && report.sections.length > 0 && (
+        <div className="space-y-4">
+          {report.sections.map((section, idx) => (
+            <div key={idx} className="card">
+              <div className="flex items-center justify-between mb-3">
+                <h4 className="text-sm font-semibold text-zinc-200">
+                  {section.heading}
+                </h4>
+                {section.confidence > 0 && (
+                  <div className="flex items-center gap-2">
+                    <div className="w-16 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                      <div
+                        className={`h-full rounded-full ${
+                          section.confidence >= 0.7
+                            ? "bg-emerald-500"
+                            : section.confidence >= 0.4
+                            ? "bg-amber-500"
+                            : "bg-red-500"
+                        }`}
+                        style={{ width: `${section.confidence * 100}%` }}
+                      />
+                    </div>
+                    <span className="text-xs text-zinc-500">
+                      {Math.round(section.confidence * 100)}%
+                    </span>
+                  </div>
+                )}
+              </div>
+              <div className="space-y-2">
+                {section.body.split("\n\n").map((paragraph, pIdx) => (
+                  <p key={pIdx} className="text-sm text-zinc-300 leading-relaxed">
+                    {paragraph}
+                  </p>
+                ))}
+              </div>
+              {section.citations && section.citations.length > 0 && (
+                <div className="mt-3 pt-2 border-t border-zinc-800">
+                  <div className="flex flex-wrap gap-2">
+                    {section.citations.map((url, cIdx) => (
+                      <a
+                        key={cIdx}
+                        href={url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs text-sky-500 hover:text-sky-400 flex items-center gap-1"
+                      >
+                        <ExternalLink className="w-3 h-3" />
+                        [{cIdx + 1}]
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Narrative (legacy fallback) */}
+      {!report.sections?.length && report.narrative && (
+        <div className="card">
+          <h4 className="text-sm font-semibold text-zinc-300 uppercase tracking-wider mb-4">
+            Profile Summary
+          </h4>
+          <div className="space-y-3">
+            {report.narrative.split("\n\n").map((paragraph, idx) => (
+              <p key={idx} className="text-sm text-zinc-300 leading-relaxed">
+                {paragraph}
+              </p>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Key Findings */}
+      {(report.key_findings || report.key_facts)?.length ? (
+        <div className="card">
+          <h4 className="text-sm font-semibold text-zinc-300 uppercase tracking-wider mb-3">
+            Key Findings
+          </h4>
+          <ul className="space-y-2">
+            {(report.key_findings || report.key_facts || []).map((fact, idx) => (
+              <li key={idx} className="flex items-start gap-2.5">
+                <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-sky-400 shrink-0" />
+                <span className="text-sm text-zinc-300 leading-relaxed">{fact}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {/* Risk Assessment */}
+      {report.risk_assessment && (
+        <div className="card border-l-2 border-l-amber-500 bg-amber-500/5">
+          <h4 className="text-sm font-semibold text-amber-400 uppercase tracking-wider mb-3 flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4" />
+            Risk Assessment
+          </h4>
+          <p className="text-sm text-zinc-300 leading-relaxed">
+            {report.risk_assessment}
+          </p>
+        </div>
+      )}
+
+      {/* Knowledge Gaps */}
+      {report.gaps && report.gaps.length > 0 && (
+        <div className="card border-l-2 border-l-zinc-600">
+          <h4 className="text-sm font-semibold text-zinc-400 uppercase tracking-wider mb-3">
+            Knowledge Gaps
+          </h4>
+          <ul className="space-y-1.5">
+            {report.gaps.map((gap, idx) => (
+              <li key={idx} className="flex items-start gap-2.5">
+                <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-zinc-600 shrink-0" />
+                <span className="text-sm text-zinc-400 leading-relaxed">{gap}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Connections Summary */}
+      {report.connections_summary && (
+        <div className="card">
+          <h4 className="text-sm font-semibold text-zinc-300 uppercase tracking-wider mb-3 flex items-center gap-2">
+            <Network className="w-4 h-4 text-sky-400" />
+            Connections
+          </h4>
+          <p className="text-sm text-zinc-300 leading-relaxed">
+            {report.connections_summary}
+          </p>
+        </div>
       )}
     </div>
   );

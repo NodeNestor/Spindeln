@@ -3,7 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import { Search as SearchIcon, Filter, Loader2, X } from "lucide-react";
 import PersonCard from "../components/PersonCard";
 
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8082";
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8083";
 
 interface SearchResult {
   id: string;

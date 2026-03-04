@@ -7,13 +7,17 @@ import logging
 from src.agents.base import BaseAgent
 from src.agents.registry import register_agent
 from src.models import Person, SourceType, WebMention
+from src.scraper.searxng_client import parse_date
 
 logger = logging.getLogger(__name__)
 
 
 @register_agent("web_search")
 class WebSearchAgent(BaseAgent):
-    """Performs general web search via SearXNG and extracts person-relevant data."""
+    """Performs general web search via SearXNG and extracts person-relevant data.
+
+    Uses DeepResearch-style per-page fact extraction with quality scoring.
+    """
 
     name = "web_search"
     source_type = SourceType.WEB_SEARCH
@@ -27,10 +31,12 @@ class WebSearchAgent(BaseAgent):
 
         queries = self._build_queries(person)
         total_found = 0
+        total_facts = 0
         seen_urls: set[str] = set()
 
         for query in queries:
             results = await self.search(query)
+            logger.info("WebSearch query '%s' returned %d results", query, len(results) if results else 0)
             if not results:
                 continue
 
@@ -39,79 +45,76 @@ class WebSearchAgent(BaseAgent):
                     continue
                 seen_urls.add(result.url)
 
+                content = None
                 scraped = await self.scrape(result.url)
-                if not scraped.get("success") or not scraped.get("markdown"):
-                    continue
+                if scraped.get("success") and scraped.get("markdown"):
+                    content = scraped["markdown"]
 
-                # Extract person-relevant data via LLM
-                extracted = await self.extract_json(
-                    scraped["markdown"],
-                    system=WEB_EXTRACT_SYSTEM,
-                    user=f"Find information about '{person.namn}' in this page. "
-                         f"Known location: {person.adress or 'unknown'}. "
-                         f"Known employer: {person.arbetsgivare or 'unknown'}.",
-                )
-                if not extracted or not extracted.get("relevant"):
-                    continue
+                if content:
+                    # DeepResearch-style: extract structured facts per page
+                    facts = await self.extract_page_facts(
+                        content, person,
+                        source_url=result.url,
+                        source_title=result.title or "",
+                    )
 
-                mention = WebMention(
-                    url=result.url,
-                    title=result.title,
-                    snippet=extracted.get("summary", result.snippet)[:500],
-                    source_type="web_search",
-                )
-                person.web_mentions.append(mention)
-                total_found += 1
+                    if facts:
+                        person.sourced_facts.extend(facts)
+                        total_facts += len(facts)
 
-                await self.store_person_fact(
-                    person,
-                    f"Web mention at {result.url}: {extracted.get('summary', '')}",
-                    tags=["web_search", extracted.get("category", "general")],
-                )
+                        # Also create a WebMention for backward compatibility
+                        summary = "; ".join(f.content for f in facts[:3])
+                        mention = WebMention(
+                            url=result.url,
+                            title=result.title,
+                            snippet=summary[:500],
+                            datum=parse_date(result.published_date),
+                            source_type="web_search",
+                        )
+                        person.web_mentions.append(mention)
+                        total_found += 1
 
-                # If the page reveals new structured data, try to merge it
-                if extracted.get("new_data"):
-                    await self._merge_new_data(person, extracted["new_data"])
+                        # Store aggregated facts in HiveMindDB
+                        for fact in facts:
+                            await self.store_person_fact(
+                                person, fact.content,
+                                tags=["web_search", fact.category, str(fact.quality_score)],
+                            )
+                        continue
+
+                # Fallback: use SearXNG snippet directly if it mentions the person
+                if result.snippet and person.namn.lower().split()[0] in result.snippet.lower():
+                    mention = WebMention(
+                        url=result.url,
+                        title=result.title,
+                        snippet=result.snippet[:500],
+                        datum=parse_date(result.published_date),
+                        source_type="web_search",
+                    )
+                    person.web_mentions.append(mention)
+                    total_found += 1
+
+                    await self.store_person_fact(
+                        person,
+                        f"Web mention at {result.url}: {result.snippet[:300]}",
+                        tags=["web_search", "snippet"],
+                    )
 
         person.sources.append(self.make_source_ref("searxng:web"))
-        logger.info("WebSearch: Found %d mentions for %s", total_found, person.namn)
+        logger.info("WebSearch: Found %d mentions, %d facts for %s",
+                     total_found, total_facts, person.namn)
         return person
 
     def _build_queries(self, person: Person) -> list[str]:
         """Build varied search queries for the person."""
-        queries = [f'"{person.namn}"']
+        queries = [
+            f'"{person.namn}"',   # exact match
+            person.namn,           # unquoted fallback
+        ]
         if person.adress and person.adress.ort:
-            queries.append(f'"{person.namn}" {person.adress.ort}')
+            queries.append(f'{person.namn} {person.adress.ort}')
         if person.arbetsgivare:
-            queries.append(f'"{person.namn}" {person.arbetsgivare}')
+            queries.append(f'{person.namn} {person.arbetsgivare}')
         if person.personnummer:
             queries.append(f'"{person.personnummer}"')
-        return queries[:4]
-
-    async def _merge_new_data(self, person: Person, new_data: dict):
-        """Merge newly discovered data fields into person."""
-        if new_data.get("arbetsgivare") and not person.arbetsgivare:
-            person.arbetsgivare = new_data["arbetsgivare"]
-        if new_data.get("telefon"):
-            await self.store_person_fact(
-                person, f"Phone number found: {new_data['telefon']}",
-                tags=["web_search", "phone"],
-            )
-
-
-WEB_EXTRACT_SYSTEM = """You are analyzing a webpage for information about a specific person.
-
-Return JSON:
-{
-  "relevant": true/false,
-  "summary": "Brief summary of what the page says about this person",
-  "category": "professional|financial|social|legal|personal|other",
-  "new_data": {
-    "arbetsgivare": "Employer if found",
-    "telefon": "Phone if found",
-    "email": "Email if found"
-  }
-}
-
-Only set relevant=true if the page clearly discusses the target person.
-Do not confuse people with similar names."""
+        return queries[:5]

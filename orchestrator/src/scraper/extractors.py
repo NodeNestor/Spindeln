@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 import httpx
 
@@ -21,46 +22,225 @@ async def get_client() -> httpx.AsyncClient:
     return _client
 
 
-async def extract_json(content: str, system_prompt: str,
-                       user_prompt: str, *, max_tokens: int = 4096) -> dict | list | None:
-    """Send content to vLLM and extract structured JSON.
+def _repair_json(text: str) -> dict | list | None:
+    """Try to parse JSON, repairing common LLM output issues.
 
-    Returns parsed JSON or None on failure.
+    Handles truncated JSON (from token limits), trailing commas, markdown
+    fences, and mixed text/JSON output.
     """
-    client = await get_client()
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt + "\n\nContent to analyze:\n" + content[:12000]},
-    ]
+    text = text.strip()
 
+    # Strip markdown code fences
+    if text.startswith("```"):
+        lines = text.split("\n")
+        text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+        text = text.strip()
+
+    # Try direct parse first
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Find the first { or [
+    start = -1
+    for i, c in enumerate(text):
+        if c in "{[":
+            start = i
+            break
+    if start == -1:
+        return None
+
+    text = text[start:]
+
+    # Track bracket stack for proper closing of truncated JSON
+    stack: list[str] = []
+    in_string = False
+    escape = False
+    end = len(text)
+    complete = False
+
+    for i, c in enumerate(text):
+        if escape:
+            escape = False
+            continue
+        if c == "\\":
+            escape = True
+            continue
+        if c == '"' and not escape:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c in "{[":
+            stack.append("}" if c == "{" else "]")
+        elif c in "}]":
+            if stack:
+                stack.pop()
+            if not stack:
+                end = i + 1
+                complete = True
+                break
+
+    candidate = text[:end]
+
+    # Try parsing the complete candidate
+    if complete:
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+        # Remove trailing commas before } or ]
+        candidate = re.sub(r',\s*([}\]])', r'\1', candidate)
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
+    # If truncated (stack not empty), try to close open structures
+    if stack:
+        fixed = candidate
+        # Close any open string
+        if in_string:
+            fixed += '"'
+        # Remove any trailing partial key/value (truncated mid-token)
+        # Strip back to the last complete value
+        fixed = re.sub(r',\s*"[^"]*$', '', fixed)  # trailing incomplete key
+        fixed = re.sub(r':\s*"[^"]*$', ': ""', fixed)  # trailing incomplete string value
+        fixed = re.sub(r':\s*$', ': null', fixed)  # trailing incomplete value
+        # Remove trailing commas
+        fixed = re.sub(r',\s*$', '', fixed)
+        # Close remaining brackets in reverse order
+        fixed += "".join(reversed(stack))
+        # Remove trailing commas before closers
+        fixed = re.sub(r',\s*([}\]])', r'\1', fixed)
+        try:
+            return json.loads(fixed)
+        except json.JSONDecodeError:
+            pass
+
+        # More aggressive: find the last complete item in the top-level array/object
+        # and truncate there
+        try:
+            # Find the last successful parse point by progressively removing trailing content
+            for trim_re in [
+                r',\s*\{[^{}]*$',       # remove last incomplete object in array
+                r',\s*\[[^\[\]]*$',      # remove last incomplete array element
+                r',\s*"[^"]*"\s*:\s*\{[^{}]*$',  # remove last incomplete key:object
+            ]:
+                trimmed = re.sub(trim_re, '', fixed)
+                if trimmed != fixed:
+                    # Re-close brackets
+                    trimmed_stack = []
+                    in_str = False
+                    esc = False
+                    for c in trimmed:
+                        if esc:
+                            esc = False
+                            continue
+                        if c == '\\':
+                            esc = True
+                            continue
+                        if c == '"' and not esc:
+                            in_str = not in_str
+                            continue
+                        if in_str:
+                            continue
+                        if c in '{[':
+                            trimmed_stack.append('}' if c == '{' else ']')
+                        elif c in '}]' and trimmed_stack:
+                            trimmed_stack.pop()
+                    trimmed += "".join(reversed(trimmed_stack))
+                    trimmed = re.sub(r',\s*([}\]])', r'\1', trimmed)
+                    result = json.loads(trimmed)
+                    return result
+        except (json.JSONDecodeError, Exception):
+            pass
+
+    return None
+
+
+async def _call_llm(api_url: str, model: str, api_key: str,
+                    messages: list[dict], max_tokens: int,
+                    temperature: float = 0.1,
+                    timeout: float = 120.0,
+                    extra_body: dict | None = None) -> dict | list | None:
+    """Low-level LLM call shared by bulk and synthesis paths."""
+    client = await get_client()
+    body = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+    if extra_body:
+        body.update(extra_body)
     try:
         resp = await client.post(
-            f"{settings.vllm_url}/chat/completions",
-            json={
-                "model": settings.vllm_model,
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "temperature": 0.1,
-            },
-            headers={"Authorization": f"Bearer {settings.vllm_api_key}"} if settings.vllm_api_key else {},
+            f"{api_url}/chat/completions",
+            json=body,
+            headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
+            timeout=timeout,
         )
         resp.raise_for_status()
         data = resp.json()
-        text = data["choices"][0]["message"]["content"]
+        msg = data["choices"][0]["message"]
+        text = msg.get("content") or msg.get("reasoning_content") or ""
+        if not text:
+            logger.warning("LLM returned empty content (model=%s)", model)
+            return None
 
-        # Extract JSON from possible markdown code blocks
-        text = text.strip()
-        if text.startswith("```"):
-            lines = text.split("\n")
-            text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-        return json.loads(text)
+        result = _repair_json(text)
+        if result is None:
+            logger.warning("LLM returned unparseable response (model=%s, len=%d): %.300s", model, len(text), text)
+        return result
 
-    except json.JSONDecodeError as e:
-        logger.warning("LLM returned non-JSON: %s", e)
-        return None
     except Exception as e:
-        logger.error("LLM extraction failed: %s", e)
+        logger.error("LLM call failed (%s): [%s] %s", model, type(e).__name__, e)
         return None
+
+
+def _build_messages(content: str, system_prompt: str, user_prompt: str,
+                    max_content: int = 12000) -> list[dict]:
+    if not isinstance(content, str):
+        content = str(content)
+    # Reinforce JSON-only output for small models
+    system = system_prompt + "\n\nIMPORTANT: Output ONLY valid JSON. No commentary, no explanation, no markdown fences."
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user_prompt + "\n\nContent to analyze:\n" + content[:max_content]},
+    ]
+
+
+async def extract_json(content: str, system_prompt: str,
+                       user_prompt: str, *, max_tokens: int = 4096) -> dict | list | None:
+    """Send content to bulk extraction model and extract structured JSON."""
+    messages = _build_messages(content, system_prompt, user_prompt)
+    return await _call_llm(
+        api_url=settings.bulk_api_url,
+        model=settings.bulk_model,
+        api_key=settings.bulk_api_key,
+        messages=messages,
+        max_tokens=max_tokens,
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    )
+
+
+async def extract_json_synthesis(content: str, system_prompt: str,
+                                 user_prompt: str, *, max_tokens: int = 0) -> dict | list | None:
+    """Send content to synthesis model (bigger/smarter) and extract structured JSON."""
+    if max_tokens <= 0:
+        max_tokens = settings.synthesis_max_tokens
+    messages = _build_messages(content, system_prompt, user_prompt, max_content=30000)
+    return await _call_llm(
+        api_url=settings.synthesis_api_url,
+        model=settings.synthesis_model,
+        api_key=settings.synthesis_api_key,
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=0.3,
+        timeout=600.0,  # synthesis can take much longer (reasoning models)
+    )
 
 
 # ── Domain-Specific Extraction Prompts ────────────────────────────────────────
@@ -225,6 +405,159 @@ async def extract_breach_data(content: str, person_context: str = "") -> dict | 
         BREACH_EXTRACT_SYSTEM,
         f"Analyze breach/leak data.{f' Person context: {person_context}' if person_context else ''}",
     )
+
+
+# ── DeepResearch-Style Per-Page Fact Extraction ──────────────────────────────
+
+PAGE_FACT_EXTRACT_SYSTEM = """You extract ALL useful knowledge about a specific person from web pages. Output JSON only.
+
+CRITICAL — IDENTITY VERIFICATION:
+- This page may contain data about MULTIPLE people with similar names.
+- ONLY extract facts clearly about the TARGET person (identified in the user prompt).
+- If the page shows a list of search results with multiple people, only extract data for the matching person.
+- Do NOT extract template data, example data, or "how to use this site" content.
+- Do NOT extract data from page sidebars, ads, or sections about other people.
+- If unsure whether data belongs to the target person, set confidence to 0.3 or lower.
+- Use the IDENTITY ANCHORS provided (birth date, address, personnummer) to verify which data belongs to the target.
+
+GOOD facts (specific, verifiable, about the TARGET person):
+- "Zephyr Moonstone is 35 years old, born 1990-03-22"
+- "Lives at Storgatan 12, Kalmar"
+- "Board member of Moonstone AB (org 556123-4567) since 2021"
+- "Deklarerad inkomst: 380,000 SEK (2023)"
+- "Mentioned in Aftonbladet article about tech startups, 2024-05-15"
+- "Instagram profile: @zephyr.m, 1200 followers, bio says entrepreneur"
+- "Neighbor: Erik Johansson at same address"
+
+BAD facts (do NOT extract):
+- "The page discusses someone" (meta, not knowledge)
+- "No information found" (absence is not knowledge)
+- "Someone with a similar name" (uncertain identity)
+- Template/example data shown in site tutorials
+- Data from page headers/footers about other people
+- Generic site statistics or visitor counts
+
+Return JSON:
+{
+  "quality": 0-10,
+  "relevant": true/false,
+  "facts": [
+    {"fact": "Specific statement", "confidence": 0.9, "category": "identity"}
+  ],
+  "entities": [
+    {"name": "Entity Name", "type": "person|company|address|organization"}
+  ],
+  "relationships": [
+    {"source": "entity1", "target": "entity2", "type": "works_at|lives_in|family"}
+  ],
+  "summary": "Brief summary"
+}
+
+Categories: identity, professional, financial, social, legal, digital, personal, general
+Quality: 0=not about this person, 5=some info, 10=primary source
+
+Extract EVERY fact you can find about the TARGET person. Be thorough — include names, numbers, dates, amounts, addresses, relationships, roles, everything. But ONLY for the target person."""
+
+
+async def extract_page_facts(content: str, person_name: str,
+                              person_context: str = "", source_url: str = "",
+                              source_title: str = "",
+                              identity_anchors: dict | None = None) -> dict | None:
+    """DeepResearch-style per-page fact extraction with quality scoring.
+
+    Returns structured facts, entities, and relationships from a single page.
+    Uses a smaller content window and token limit to avoid truncation with small models.
+    """
+    user_prompt = (
+        f"Extract ALL facts about '{person_name}' from this page.\n"
+    )
+
+    # Add identity anchors for disambiguation
+    if identity_anchors:
+        user_prompt += "\nTARGET PERSON IDENTITY (use to verify data belongs to them):\n"
+        user_prompt += f"- Name: {person_name}\n"
+        if identity_anchors.get("birth_date"):
+            user_prompt += f"- Born: {identity_anchors['birth_date']}\n"
+        if identity_anchors.get("address"):
+            user_prompt += f"- Address: {identity_anchors['address']}\n"
+        if identity_anchors.get("personnummer"):
+            user_prompt += f"- Personnummer: {identity_anchors['personnummer']}\n"
+        if identity_anchors.get("age"):
+            user_prompt += f"- Age: {identity_anchors['age']}\n"
+        user_prompt += "Use these to determine if page content refers to THIS person or someone else.\n"
+
+    if person_context:
+        user_prompt += f"Known context: {person_context}\n"
+    if source_url:
+        user_prompt += f"Source URL: {source_url}\n"
+
+    result = await extract_json(
+        content, PAGE_FACT_EXTRACT_SYSTEM, user_prompt,
+        max_tokens=4096,
+    )
+
+    if result and isinstance(result, dict):
+        # Inject source metadata into each fact
+        for fact in result.get("facts", []):
+            fact["source_url"] = source_url
+            fact["source_title"] = source_title
+        return result
+    return None
+
+
+# ── Fact Deduplication ────────────────────────────────────────────────────────
+
+def normalize_fact(text: str) -> str:
+    """Normalize fact text for deduplication — lowercase, strip, remove trailing punct."""
+    t = text.strip().lower().rstrip(".")
+    return " ".join(t.split())
+
+
+def is_duplicate_fact(key: str, seen: set) -> bool:
+    """Check if a normalized fact is a duplicate — exact match OR substring of existing."""
+    if key in seen:
+        return True
+    for existing in seen:
+        shorter, longer = (key, existing) if len(key) <= len(existing) else (existing, key)
+        if shorter in longer:
+            return True
+    return False
+
+
+def deduplicate_facts(facts: list) -> list:
+    """Deduplicate a list of SourcedFact objects by normalized content."""
+    seen: set[str] = set()
+    unique = []
+    for f in facts:
+        key = normalize_fact(f.content if hasattr(f, 'content') else str(f))
+        if not key or is_duplicate_fact(key, seen):
+            continue
+        seen.add(key)
+        unique.append(f)
+    return unique
+
+
+# ── Temporal Scoring ─────────────────────────────────────────────────────────
+
+def score_fact_recency(discovered_at) -> float:
+    """Score a fact by recency — exponential decay with 6-month half-life.
+
+    Returns 0.0 (very old) to 1.0 (very recent). None dates get 0.5.
+    """
+    from datetime import datetime, timezone
+    if not discovered_at:
+        return 0.5
+    try:
+        now = datetime.utcnow()
+        if hasattr(discovered_at, 'timestamp'):
+            age_days = (now - discovered_at).days
+        else:
+            return 0.5
+        if age_days < 0:
+            return 1.0
+        return 0.5 ** (age_days / 180)  # 6-month half-life
+    except Exception:
+        return 0.5
 
 
 async def close():
