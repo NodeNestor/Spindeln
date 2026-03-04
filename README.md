@@ -2,7 +2,7 @@
 
 **Swedish Person Intelligence Platform** — an AI-powered multi-agent OSINT system that searches, scrapes, extracts, validates, and synthesizes person data from Swedish public records, social media, breach databases, and the open web.
 
-Built with a two-model architecture: a fast local model for bulk extraction and an optional synthesis model for identity verification, fact validation, and report generation.
+Built with a two-model architecture: a fast local model for bulk extraction and a synthesis model for identity verification, fact validation, and report generation.
 
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Python](https://img.shields.io/badge/python-3.12-blue)
@@ -22,15 +22,20 @@ flowchart TD
     D --> E[Web & News Search]
     E --> F[Breach Check]
     F --> G{Fact Validation}
-    G -->|Remove wrong-person data| H[Discovery Loop]
-    H -->|New identifiers found| H
-    H -->|Converged| I[Graph Construction]
-    I --> J[Report Synthesis]
-    J --> K[Complete]
+    G -->|Age-aware plausibility| G2{Verification Branches}
+    G2 -->|Search & verify claims| G2
+    G2 -->|Remove wrong-person data| H{Structured Validation}
+    H -->|Validate company roles & profiles| I[Discovery Loop]
+    I -->|New identifiers found| I
+    I -->|Converged| J[Graph Construction]
+    J --> K[Report Synthesis]
+    K --> L[Complete]
 
     style G fill:#f9a825,color:#000
+    style G2 fill:#ff8f00,color:#000
     style H fill:#f9a825,color:#000
-    style J fill:#4caf50,color:#fff
+    style I fill:#f9a825,color:#000
+    style K fill:#4caf50,color:#fff
 ```
 
 Each investigation runs through **11 phases**, orchestrated by a central pipeline that coordinates 28+ specialized agents:
@@ -39,13 +44,13 @@ Each investigation runs through **11 phases**, orchestrated by a central pipelin
 |-------|-------------|
 | **Seed Resolution** | Anchor identity via Ratsit/Hitta (name, personnummer, DOB) |
 | **Public Records** | Parallel swarm across 9 Swedish registries |
-| **Social Media** | Multi-identifier search across 9 platforms |
+| **Social Media** | Multi-identifier search across 9 platforms (name + emails + handles) |
 | **Web & News** | General web mentions + Swedish news sources |
 | **Breach Check** | HIBP, IntelX, Hudson Rock, Ahmia, paste sites |
-| **Fact Validation** | Synthesis model verifies facts belong to the right person |
-| **Discovery Loop** | Iterative re-search using found emails/handles/companies |
+| **Fact Validation** | Three-pass validation: rate facts, verify uncertain claims via search, validate structured fields |
+| **Discovery Loop** | Iterative re-search using found emails/handles/companies until convergence |
 | **Graph Construction** | Knowledge graph + timeline in HiveMindDB |
-| **Report Synthesis** | LLM-generated intelligence report with citations |
+| **Report Synthesis** | LLM-generated intelligence report with citations and risk assessment |
 | **Embeddings** | Multi-category vector embeddings |
 | **Loom Bridge** | Temporal data context (optional) |
 
@@ -76,16 +81,57 @@ flowchart LR
 ```
 
 - **Bulk model**: Runs locally on GPU. Handles high-volume extraction from scraped pages. Cheap and fast.
-- **Synthesis model**: Optional. Used for fact validation (identity disambiguation), contradiction detection, and report generation. Can be any OpenAI-compatible API.
+- **Synthesis model**: Used for fact validation (identity disambiguation), verification branches, structured field validation, contradiction detection, and report generation. Can be any OpenAI-compatible API.
 
 ### Identity Disambiguation
 
-The core innovation is **iterative identity verification**. When searching "Oscar Nyblom", results may come from multiple people with the same name. Spindeln solves this with:
+The core challenge is **identity confusion** — searching "Oscar Nyblom" returns results from multiple people with the same name. Spindeln solves this with a multi-layered verification system:
+
+```mermaid
+flowchart TD
+    subgraph Pass1["Pass 1: Fact Rating"]
+        R1[Rate each fact]
+        R2{Rating?}
+        R1 --> R2
+        R2 -->|CONFIRMED| C1[Keep — boost confidence]
+        R2 -->|WRONG_PERSON| C2[Remove]
+        R2 -->|CONTRADICTS| C3[Keep — lower confidence]
+        R2 -->|VERIFY| C4[Queue for verification]
+        R2 -->|PLAUSIBLE| C5[Keep]
+    end
+
+    subgraph Pass2["Pass 2: Verification Branches"]
+        V1[Search for the specific claim]
+        V2[Scrape results]
+        V3[Compare found person with target]
+        V4{Same person?}
+        V1 --> V2 --> V3 --> V4
+        V4 -->|Yes| V5[Keep fact]
+        V4 -->|No| V6[Remove fact]
+    end
+
+    subgraph Pass3["Pass 3: Structured Validation"]
+        S1[Validate company roles]
+        S2[Validate social profiles]
+        S3[Age-plausibility check]
+        S1 --> S3
+        S2 --> S3
+    end
+
+    Pass1 --> Pass2 --> Pass3
+
+    style Pass1 fill:#e3f2fd,color:#000
+    style Pass2 fill:#fff3e0,color:#000
+    style Pass3 fill:#e8f5e9,color:#000
+```
 
 1. **Identity anchors** — DOB, address, personnummer are threaded into every extraction prompt
-2. **Fact validation** — synthesis model rates each fact as CONFIRMED / PLAUSIBLE / WRONG_PERSON / CONTRADICTS
-3. **Contradiction detection** — conflicting birth dates and ages are automatically flagged
-4. **Discovery loop** — found emails/handles trigger re-searches on other platforms, building a verified identity profile
+2. **Age-aware validation** — current age is computed from DOB and used to reject implausible claims (e.g., a 20-year-old as chairman of a major company)
+3. **Cross-referencing** — confirmed facts from earlier validation batches are fed into later batches for cross-reference
+4. **Verification branches** — when the model is uncertain about a claim, it searches for it specifically (e.g., "Eniro chairman ordförande"), scrapes the results, and compares the found person against the target's identity
+5. **Structured field validation** — company roles and social profiles are validated against the person's age and identity
+6. **Contradiction detection** — conflicting birth dates and ages are automatically flagged and weaker sources are downranked
+7. **Discovery loop** — found emails/handles trigger re-searches on other platforms, building a verified identity profile
 
 ### System Architecture
 
@@ -101,6 +147,8 @@ graph TB
         Pipeline[Investigation Pipeline]
         Agents[28+ Research Agents]
         Validator[Fact Validator]
+        VerBranch[Verification Branches]
+        StructVal[Structured Validator]
         Discovery[Discovery Loop]
     end
 
@@ -123,6 +171,10 @@ graph TB
     WS <-->|Live progress| Pipeline
     Pipeline --> Agents
     Pipeline --> Validator
+    Validator --> VerBranch
+    Validator --> StructVal
+    VerBranch -->|Search to verify claims| SearXNG
+    VerBranch -->|Scrape verification pages| Crawl4AI
     Pipeline --> Discovery
     Agents --> SearXNG
     Agents --> Crawl4AI
@@ -142,12 +194,16 @@ graph TB
 ## Features
 
 - **Real-time progress** — WebSocket live feed shows each agent's status during investigation
+- **Three-pass fact validation** — rate, verify via search, validate structured fields
+- **Verification branches** — uncertain claims trigger targeted searches to confirm or reject
+- **Age-aware plausibility** — rejects claims inconsistent with the target's known age
 - **Force-directed graph** — Interactive knowledge graph with people, companies, addresses, social profiles
 - **Timeline view** — Chronological events with date extraction from free-text facts
 - **8-tab profile view** — Overview, News, Financial, Companies, Social, Breaches, Connections, Report
+- **Multi-identifier social search** — agents search by name + found emails + found handles
+- **Discovery loop** — iterative re-search using discovered identifiers until convergence
 - **Settings UI** — Configure models, API endpoints, and rate limits from the browser
 - **MCP server** — Model Context Protocol interface for integration with other AI tools
-- **Configurable discovery loop** — Set max iterations for iterative identity enrichment
 
 ---
 
@@ -216,8 +272,10 @@ All settings can be changed at runtime from the **Settings** page or via the API
 | `synthesis_model` | Model name for validation/reports | Same as bulk |
 
 The synthesis model is used for:
-- Fact validation (identity disambiguation)
-- Report generation
+- Fact validation (three-pass: rate, verify, structured)
+- Verification branches (searching and comparing claims)
+- Structured field validation (company roles, social profiles)
+- Report generation with citations and risk assessment
 - Any agent with `use_synthesis_model = True`
 
 ### Optional API Keys
@@ -252,7 +310,7 @@ spindeln/
 │       ├── investigate.py      # Investigation pipeline orchestrator
 │       ├── models.py           # Pydantic data models
 │       ├── config.py           # Settings + runtime config
-│       ├── fact_validator.py   # Identity verification + contradiction detection
+│       ├── fact_validator.py   # Three-pass validation + verification branches
 │       ├── embeddings.py       # Multi-category vector embeddings
 │       ├── entity_resolution.py
 │       ├── scraper/
@@ -266,7 +324,7 @@ spindeln/
 │       │   ├── base.py            # BaseAgent with identity anchors
 │       │   ├── registry.py        # Agent discovery
 │       │   ├── public_records/    # 9 Swedish registry agents
-│       │   ├── social_media/      # 9 platform agents
+│       │   ├── social_media/      # 9 platform agents (multi-identifier search)
 │       │   ├── breach/            # 6 exposure agents
 │       │   ├── web/               # 3 web/news agents
 │       │   └── analysis/          # Graph, timeline, synthesis agents
@@ -304,8 +362,8 @@ spindeln/
 
 | Agent | Platform | Features |
 |-------|----------|----------|
-| facebook | Facebook | Multi-identifier search, bio parsing |
-| instagram | Instagram | Handle/email discovery from bio |
+| facebook | Facebook | Multi-identifier search (name + emails + handles), bio parsing |
+| instagram | Instagram | Handle/email discovery from bio, multi-identifier search |
 | linkedin | LinkedIn | Professional data, employer extraction |
 | twitter | Twitter/X | Bio parsing, handle discovery |
 | youtube | YouTube | Channel discovery |
@@ -324,6 +382,34 @@ spindeln/
 | ahmia | Ahmia.fi | Tor .onion mentions |
 | pastebin | Paste sites | Leaked data |
 | google_dorks | Google Dorks | Exposed files/data |
+
+---
+
+## Fact Validation System
+
+The fact validator is the core data quality layer. It runs after all agents complete and before the report is generated.
+
+### Pass 1: Fact Rating
+Each extracted fact is sent to the synthesis model with the target person's confirmed identity (name, DOB, current age, address, personnummer). The model rates each fact:
+- **CONFIRMED** — clearly matches the target, confidence boosted
+- **PLAUSIBLE** — could be this person, kept as-is
+- **WRONG_PERSON** — about someone else with a similar name, removed
+- **CONTRADICTS** — conflicts with confirmed facts, confidence lowered
+- **VERIFY** — uncertain claim that needs verification research
+
+### Pass 2: Verification Branches
+Facts rated VERIFY trigger targeted searches:
+1. The model provides a search query (e.g., "Eniro ordförande chairman")
+2. SearXNG searches for the claim
+3. Crawl4AI scrapes the top results
+4. The synthesis model compares the found person with the target's identity
+5. If different person → fact removed. If same person → fact confirmed.
+
+### Pass 3: Structured Field Validation
+Company roles (`foretag`) and social profiles are validated against the person's age and identity. A 20-year-old marked as chairman of a major public company gets that role removed.
+
+### Contradiction Detection
+Regex-based fast checks for conflicting birth dates and ages. If the person's known age is 20 but a fact claims 55, the fact is auto-flagged and confidence dropped to 0.2.
 
 ---
 
